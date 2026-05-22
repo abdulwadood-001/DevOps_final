@@ -50,7 +50,7 @@ pipeline {
 
         stage('Kubernetes Deploy') {
             steps {
-                echo "=== Deploying to Kubernetes ==="
+                echo "=== Deploying App to Kubernetes ==="
                 sh '''
                     set -e
 
@@ -66,25 +66,94 @@ pipeline {
 
                     kubectl rollout status deployment/notes-webapp --timeout=180s
 
-                    echo "=== FINAL STATUS ==="
                     kubectl get pods -o wide
                     kubectl get svc
                 '''
             }
         }
 
-        stage('Expose App Only') {
+        // ✅ NEW STAGE — Install Prometheus and Grafana
+        stage('Setup Monitoring') {
             steps {
+                echo "=== Installing Prometheus and Grafana ==="
                 sh '''
-                    echo "=== Exposing Application Service ONLY ==="
+                    set -e
 
-                    kubectl patch svc notes-webapp-svc -p '{"spec":{"type":"NodePort","ports":[{"port":3000,"targetPort":3000,"nodePort":30080}]}}'
+                    # Add helm repo if not already added
+                    helm repo add prometheus-community \
+                        https://prometheus-community.github.io/helm-charts || true
+                    helm repo update
 
-                    echo "=== Monitoring stack is already exposed by Helm ==="
-                    echo "Grafana: http://<EC2-IP>:30090"
-                    echo "Prometheus: http://<EC2-IP>:30091"
+                    # Install only if not already installed
+                    if helm status monitoring -n monitoring > /dev/null 2>&1; then
+                        echo "Monitoring stack already installed, upgrading..."
+                        helm upgrade monitoring prometheus-community/kube-prometheus-stack \
+                            --namespace monitoring \
+                            --set prometheus.service.type=NodePort \
+                            --set prometheus.service.nodePort=30091 \
+                            --set grafana.service.type=NodePort \
+                            --set grafana.service.nodePort=30090 \
+                            --set grafana.adminPassword=admin123
+                    else
+                        echo "Installing monitoring stack fresh..."
+                        helm install monitoring prometheus-community/kube-prometheus-stack \
+                            --namespace monitoring \
+                            --create-namespace \
+                            --set prometheus.service.type=NodePort \
+                            --set prometheus.service.nodePort=30091 \
+                            --set grafana.service.type=NodePort \
+                            --set grafana.service.nodePort=30090 \
+                            --set grafana.adminPassword=admin123
+                    fi
 
-                    kubectl get svc -A
+                    # Wait for Prometheus to be ready
+                    kubectl rollout status deployment/monitoring-kube-prometheus-operator \
+                        -n monitoring --timeout=180s
+
+                    # Wait for Grafana to be ready
+                    kubectl rollout status deployment/monitoring-grafana \
+                        -n monitoring --timeout=180s
+
+                    echo "=== Monitoring stack ready ==="
+                    kubectl get pods -n monitoring
+                    kubectl get svc -n monitoring
+                '''
+            }
+        }
+
+        // ✅ NEW STAGE — Expose Everything via Port Forward
+        stage('Expose All Services') {
+            steps {
+                echo "=== Exposing all services ==="
+                sh '''
+                    # Kill any old port-forwards
+                    pkill -f "port-forward" || true
+                    sleep 2
+
+                    # Expose App
+                    kubectl port-forward svc/notes-webapp-svc \
+                        30080:3000 --address 0.0.0.0 &
+
+                    # Expose Prometheus
+                    kubectl port-forward -n monitoring \
+                        svc/monitoring-kube-prometheus-prometheus \
+                        30091:9090 --address 0.0.0.0 &
+
+                    # Expose Grafana
+                    kubectl port-forward -n monitoring \
+                        svc/monitoring-grafana \
+                        30090:80 --address 0.0.0.0 &
+
+                    sleep 5
+
+                    # Verify all are working
+                    echo "=== Verifying services ==="
+                    curl -s http://localhost:30080/healthz \
+                        && echo " App is UP ✅" || echo " App is DOWN ❌"
+                    curl -s http://localhost:30091/-/healthy \
+                        && echo " Prometheus is UP ✅" || echo " Prometheus is DOWN ❌"
+                    curl -s http://localhost:30090 > /dev/null \
+                        && echo "Grafana is UP ✅" || echo "Grafana is DOWN ❌"
                 '''
             }
         }
@@ -92,12 +161,18 @@ pipeline {
 
     post {
         success {
-            echo "PIPELINE SUCCESS ✔"
-            echo "APP: http://<EC2-IP>:30080"
-            echo "GRAFANA: http://<EC2-IP>:30090"
-            echo "PROMETHEUS: http://<EC2-IP>:30091"
+            sh '''
+                EC2_IP=$(curl -s ifconfig.me)
+                echo "============================================"
+                echo "PIPELINE SUCCESS ✅"
+                echo "============================================"
+                echo "App         → http://$EC2_IP:30080"
+                echo "Prometheus  → http://$EC2_IP:30091"
+                echo "Grafana     → http://$EC2_IP:30090"
+                echo "Grafana Login → admin / admin123"
+                echo "============================================"
+            '''
         }
-
         failure {
             echo "PIPELINE FAILED ❌"
         }
