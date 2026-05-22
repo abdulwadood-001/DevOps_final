@@ -6,13 +6,17 @@ pipeline {
         DOCKER_USERNAME = "abdulwadood001"
         IMAGE_NAME      = "notes-webapp"
         REPO_URL        = "https://github.com/abdulwadood-001/DevOps_final.git"
+
+        MONITORING_NS   = "monitoring"
+        APP_PORT        = "30080"
+        GRAFANA_PORT    = "30090"
+        PROMETHEUS_PORT = "30091"
     }
 
     stages {
 
         stage('Code Fetch') {
             steps {
-                echo "Cloning repository"
                 git branch: 'main', url: "${REPO_URL}"
             }
         }
@@ -45,7 +49,7 @@ pipeline {
             }
         }
 
-        stage('Deploy to Kubernetes') {
+        stage('Deploy Kubernetes') {
             steps {
                 sh '''
                     set -e
@@ -92,19 +96,22 @@ pipeline {
             }
         }
 
-        stage('Expose Prometheus (FIXED WAY)') {
+        stage('Expose Prometheus (FIXED SAFE WAY)') {
             steps {
                 sh '''
-                    echo "Checking Prometheus service"
+                    echo "Finding Prometheus service safely..."
 
-                    PROM_SVC=$(kubectl get svc -n monitoring \
-                        -l app.kubernetes.io/name=prometheus \
-                        -o jsonpath='{.items[0].metadata.name}')
+                    SVC=$(kubectl get svc -n monitoring | grep prometheus | awk '{print $1}' | head -n 1)
 
-                    echo "Prometheus service: $PROM_SVC"
+                    echo "Prometheus Service: $SVC"
 
-                    kubectl patch svc $PROM_SVC -n monitoring \
-                    -p '{"spec":{"type":"NodePort","ports":[{"port":9090,"targetPort":9090,"nodePort":30091}]}}' || true
+                    if [ ! -z "$SVC" ]; then
+                        kubectl patch svc $SVC -n monitoring \
+                        -p '{"spec":{"type":"NodePort","ports":[{"port":9090,"targetPort":9090,"nodePort":30091}]}}' || true
+                    else
+                        echo "Prometheus service not found"
+                        exit 1
+                    fi
                 '''
             }
         }
@@ -125,13 +132,13 @@ pipeline {
                 IP=$(curl -s ifconfig.me)
 
                 echo "===================================="
-                echo "DEPLOYMENT SUCCESS"
+                echo "PIPELINE SUCCESS"
                 echo "===================================="
                 echo "APP        : http://$IP:30080"
                 echo "GRAFANA    : http://$IP:30090"
                 echo "PROMETHEUS : http://$IP:30091"
                 echo "===================================="
-                echo "LOGIN: admin / admin123"
+                echo "GRAFANA LOGIN: admin / admin123"
             '''
         }
 
