@@ -122,9 +122,9 @@ pipeline {
                     prometheus-community/kube-prometheus-stack \
                     --namespace $MONITORING_NS \
                     --set grafana.service.type=NodePort \
-                    --set grafana.service.nodePort=$GRAFANA_PORT \
+                    --set grafana.service.nodePort=30090 \
                     --set prometheus.service.type=NodePort \
-                    --set prometheus.service.nodePort=$PROMETHEUS_PORT \
+                    --set prometheus.service.nodePort=30091 \
                     --set grafana.adminPassword=admin123 \
                     --wait \
                     --timeout 10m
@@ -148,26 +148,43 @@ pipeline {
             }
         }
 
-        stage('Verify Monitoring Services') {
+        stage('Expose Prometheus Publicly') {
             steps {
                 sh '''
-                    echo "Checking Grafana"
-                    curl http://192.168.49.2:$GRAFANA_PORT || true
+                    pkill -f "port-forward.*30091:9090" || true
 
-                    echo ""
-                    echo "Checking Prometheus"
-                    curl http://192.168.49.2:$PROMETHEUS_PORT || true
+                    nohup kubectl port-forward \
+                    -n monitoring \
+                    svc/monitoring-kube-prometheus-prometheus \
+                    30091:9090 \
+                    --address 0.0.0.0 \
+                    > prometheus.log 2>&1 &
 
-                    echo ""
-                    kubectl get svc -n monitoring
+                    sleep 10
+
+                    sudo ss -tulnp | grep 30091 || true
                 '''
             }
         }
 
-        stage('Verify Deployment') {
+        stage('Verify Services') {
             steps {
                 sh '''
+                    echo "Application"
+                    curl http://192.168.49.2:30080 || true
+
+                    echo ""
+                    echo "Grafana"
+                    curl http://192.168.49.2:30090 || true
+
+                    echo ""
+                    echo "Prometheus"
+                    curl http://localhost:30091 || true
+
+                    echo ""
                     kubectl get pods -A
+
+                    echo ""
                     kubectl get svc -A
                 '''
             }
