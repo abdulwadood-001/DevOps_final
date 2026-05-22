@@ -52,6 +52,8 @@ pipeline {
             steps {
                 echo "=== Deploying to Kubernetes ==="
                 sh '''
+                    set -e
+
                     kubectl apply -f K8s/db-pvc.yaml
                     kubectl apply -f K8s/db-deployment.yml
                     kubectl apply -f K8s/db-service.yml
@@ -71,14 +73,19 @@ pipeline {
             }
         }
 
-        stage('Expose Services') {
+        stage('Expose Services (FIXED PORTS)') {
             steps {
                 sh '''
-                    echo "=== Exposing Services ==="
+                    echo "=== Exposing Services with FIXED NodePorts ==="
 
-                    kubectl patch svc notes-webapp-svc -p '{"spec":{"type":"NodePort"}}'
-                    kubectl patch svc monitoring-grafana -n monitoring -p '{"spec":{"type":"NodePort"}}'
-                    kubectl patch svc monitoring-kube-prometheus-prometheus -n monitoring -p '{"spec":{"type":"NodePort"}}'
+                    # APP
+                    kubectl patch svc notes-webapp-svc -p '{"spec":{"type":"NodePort","ports":[{"port":3000,"targetPort":3000,"nodePort":30080}]}}'
+
+                    # GRAFANA
+                    kubectl patch svc monitoring-grafana -n monitoring -p '{"spec":{"type":"NodePort","ports":[{"port":80,"targetPort":3000,"nodePort":30090}]}}'
+
+                    # PROMETHEUS
+                    kubectl patch svc monitoring-kube-prometheus-prometheus -n monitoring -p '{"spec":{"type":"NodePort","ports":[{"port":9090,"targetPort":9090,"nodePort":30091}]}}'
 
                     echo "=== FINAL SERVICES ==="
                     kubectl get svc -A
@@ -90,7 +97,9 @@ pipeline {
     post {
         success {
             echo "PIPELINE SUCCESS ✔"
-            echo "App: http://<EC2-IP>:30080"
+            echo "APP: http://<EC2-IP>:30080"
+            echo "GRAFANA: http://<EC2-IP>:30090"
+            echo "PROMETHEUS: http://<EC2-IP>:30091"
         }
         failure {
             echo "PIPELINE FAILED ❌"
