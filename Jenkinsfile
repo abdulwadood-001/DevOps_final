@@ -66,28 +66,24 @@ pipeline {
 
                     kubectl rollout status deployment/notes-webapp --timeout=180s
 
+                    echo "=== FINAL STATUS ==="
                     kubectl get pods -o wide
                     kubectl get svc
-                    kubectl get hpa
                 '''
             }
         }
 
-        stage('Expose Services (FIXED PORTS)') {
+        stage('Expose App Only') {
             steps {
                 sh '''
-                    echo "=== Exposing Services with FIXED NodePorts ==="
+                    echo "=== Exposing Application Service ONLY ==="
 
-                    # APP
                     kubectl patch svc notes-webapp-svc -p '{"spec":{"type":"NodePort","ports":[{"port":3000,"targetPort":3000,"nodePort":30080}]}}'
 
-                    # GRAFANA
-                    kubectl patch svc monitoring-grafana -n monitoring -p '{"spec":{"type":"NodePort","ports":[{"port":80,"targetPort":3000,"nodePort":30090}]}}'
+                    echo "=== Monitoring stack is already exposed by Helm ==="
+                    echo "Grafana: http://<EC2-IP>:30090"
+                    echo "Prometheus: http://<EC2-IP>:30091"
 
-                    # PROMETHEUS
-                    kubectl patch svc monitoring-kube-prometheus-prometheus -n monitoring -p '{"spec":{"type":"NodePort","ports":[{"port":9090,"targetPort":9090,"nodePort":30091}]}}'
-
-                    echo "=== FINAL SERVICES ==="
                     kubectl get svc -A
                 '''
             }
@@ -101,6 +97,7 @@ pipeline {
             echo "GRAFANA: http://<EC2-IP>:30090"
             echo "PROMETHEUS: http://<EC2-IP>:30091"
         }
+
         failure {
             echo "PIPELINE FAILED ❌"
         }
