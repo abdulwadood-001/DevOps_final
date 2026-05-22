@@ -2,7 +2,6 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_REGISTRY = "docker.io"
         DOCKER_USERNAME = "abdulwadood001"
         IMAGE_NAME      = "notes-webapp"
         REPO_URL        = "https://github.com/abdulwadood-001/DevOps_final.git"
@@ -12,7 +11,7 @@ pipeline {
 
         APP_PORT        = "30080"
         GRAFANA_PORT    = "30090"
-        PROMETHEUS_PORT = "30091"
+        PROMETHEUS_PORT = "9090"
     }
 
     stages {
@@ -28,10 +27,8 @@ pipeline {
                 dir('app') {
                     sh '''
                         docker build -t $DOCKER_USERNAME/$IMAGE_NAME:$BUILD_NUMBER .
-
-                        docker tag \
-                        $DOCKER_USERNAME/$IMAGE_NAME:$BUILD_NUMBER \
-                        $DOCKER_USERNAME/$IMAGE_NAME:latest
+                        docker tag $DOCKER_USERNAME/$IMAGE_NAME:$BUILD_NUMBER \
+                                   $DOCKER_USERNAME/$IMAGE_NAME:latest
                     '''
                 }
             }
@@ -41,19 +38,13 @@ pipeline {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-creds',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
+                    usernameVariable: 'USER',
+                    passwordVariable: 'PASS'
                 )]) {
-
                     sh '''
-                        echo $DOCKER_PASS | docker login \
-                        -u $DOCKER_USER --password-stdin
-
-                        docker push \
-                        $DOCKER_USERNAME/$IMAGE_NAME:$BUILD_NUMBER
-
-                        docker push \
-                        $DOCKER_USERNAME/$IMAGE_NAME:latest
+                        echo $PASS | docker login -u $USER --password-stdin
+                        docker push $DOCKER_USERNAME/$IMAGE_NAME:$BUILD_NUMBER
+                        docker push $DOCKER_USERNAME/$IMAGE_NAME:latest
                     '''
                 }
             }
@@ -65,9 +56,7 @@ pipeline {
                     kubectl apply -f K8s/db-pvc.yaml
                     kubectl apply -f K8s/db-deployment.yml
                     kubectl apply -f K8s/db-service.yml
-
-                    kubectl rollout status deployment/postgres \
-                    --timeout=180s
+                    kubectl rollout status deployment/postgres --timeout=180s
                 '''
             }
         }
@@ -75,15 +64,13 @@ pipeline {
         stage('Deploy Application') {
             steps {
                 sh '''
-                    sed -i "s|image: .*|image: $DOCKER_USERNAME/$IMAGE_NAME:$BUILD_NUMBER|g" \
-                    K8s/web-deployment.yml
+                    sed -i "s|image: .*|image: $DOCKER_USERNAME/$IMAGE_NAME:$BUILD_NUMBER|g" K8s/web-deployment.yml
 
                     kubectl apply -f K8s/web-deployment.yml
                     kubectl apply -f K8s/web-service.yml
                     kubectl apply -f K8s/web-hpa.yml
 
-                    kubectl rollout status deployment/notes-webapp \
-                    --timeout=180s
+                    kubectl rollout status deployment/notes-webapp --timeout=180s
                 '''
             }
         }
@@ -91,18 +78,8 @@ pipeline {
         stage('Expose Application') {
             steps {
                 sh '''
-                    kubectl patch svc notes-webapp-svc \
-                    --type='merge' \
-                    -p '{
-                        "spec": {
-                            "type": "NodePort",
-                            "ports": [{
-                                "port": 3000,
-                                "targetPort": 3000,
-                                "nodePort": 30080
-                            }]
-                        }
-                    }' || true
+                    kubectl patch svc notes-webapp-svc --type=merge \
+                    -p '{"spec":{"type":"NodePort","ports":[{"port":3000,"targetPort":3000,"nodePort":30080}]}}' || true
                 '''
             }
         }
@@ -110,81 +87,68 @@ pipeline {
         stage('Install Monitoring Stack') {
             steps {
                 sh '''
-                    kubectl get namespace $MONITORING_NS || \
-                    kubectl create namespace $MONITORING_NS
+                    kubectl get namespace $MONITORING_NS || kubectl create namespace $MONITORING_NS
 
-                    helm repo add prometheus-community \
-                    https://prometheus-community.github.io/helm-charts || true
-
+                    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
                     helm repo update
 
-                    helm upgrade --install $HELM_RELEASE \
-                    prometheus-community/kube-prometheus-stack \
-                    --namespace $MONITORING_NS \
-                    --set grafana.service.type=NodePort \
-                    --set grafana.service.nodePort=30090 \
-                    --set prometheus.service.type=NodePort \
-                    --set prometheus.service.nodePort=30091 \
-                    --set grafana.adminPassword=admin123 \
-                    --wait \
-                    --timeout 10m
+                    helm upgrade --install $HELM_RELEASE prometheus-community/kube-prometheus-stack \
+                        --namespace $MONITORING_NS \
+                        --set grafana.adminPassword=admin123 \
+                        --wait --timeout 10m
                 '''
             }
         }
 
-        stage('Wait for Monitoring Pods') {
+        stage('Wait for Monitoring') {
             steps {
                 sh '''
-                    kubectl rollout status \
-                    deployment/monitoring-grafana \
-                    -n monitoring \
-                    --timeout=300s
-
-                    kubectl rollout status \
-                    statefulset/prometheus-monitoring-kube-prometheus-prometheus \
-                    -n monitoring \
-                    --timeout=300s
+                    kubectl rollout status deployment/monitoring-grafana -n monitoring --timeout=300s || true
+                    kubectl rollout status statefulset/prometheus-monitoring-kube-prometheus-prometheus -n monitoring --timeout=300s || true
                 '''
             }
         }
 
-        stage('Expose Prometheus Publicly') {
+        stage('Expose Prometheus (FIXED PORT-FORWARD)') {
             steps {
                 sh '''
-                    pkill -f "port-forward.*30091:9090" || true
+                    pkill -f "kubectl port-forward" || true
 
                     nohup kubectl port-forward \
-                    -n monitoring \
-                    svc/monitoring-kube-prometheus-prometheus \
-                    30091:9090 \
-                    --address 0.0.0.0 \
-                    > prometheus.log 2>&1 &
+                        -n monitoring \
+                        svc/monitoring-kube-prometheus-prometheus \
+                        9090:9090 \
+                        --address 0.0.0.0 \
+                        > prometheus.log 2>&1 &
 
                     sleep 10
 
-                    sudo ss -tulnp | grep 30091 || true
+                    curl -s http://localhost:9090 || true
                 '''
             }
         }
 
-        stage('Verify Services') {
+        stage('Expose Grafana (OPTIONAL SAFE)') {
             steps {
                 sh '''
-                    echo "Application"
-                    curl http://192.168.49.2:30080 || true
+                    pkill -f "30090:80" || true
 
-                    echo ""
-                    echo "Grafana"
-                    curl http://192.168.49.2:30090 || true
+                    nohup kubectl port-forward \
+                        -n monitoring \
+                        svc/monitoring-grafana \
+                        30090:80 \
+                        --address 0.0.0.0 \
+                        > grafana.log 2>&1 &
 
-                    echo ""
-                    echo "Prometheus"
-                    curl http://localhost:30091 || true
+                    sleep 5
+                '''
+            }
+        }
 
-                    echo ""
+        stage('Verify') {
+            steps {
+                sh '''
                     kubectl get pods -A
-
-                    echo ""
                     kubectl get svc -A
                 '''
             }
@@ -194,25 +158,19 @@ pipeline {
     post {
         success {
             sh '''
-                PUBLIC_IP=$(curl -s ifconfig.me)
+                IP=$(curl -s ifconfig.me)
 
-                echo ""
-                echo "====================================="
                 echo "DEPLOYMENT SUCCESSFUL"
-                echo "====================================="
-                echo "Application : http://$PUBLIC_IP:30080"
-                echo "Grafana     : http://$PUBLIC_IP:30090"
-                echo "Prometheus  : http://$PUBLIC_IP:30091"
-                echo ""
-                echo "Grafana Login"
-                echo "Username : admin"
-                echo "Password : admin123"
-                echo "====================================="
+                echo "APP        : http://$IP:30080"
+                echo "GRAFANA    : http://$IP:30090"
+                echo "PROMETHEUS : http://$IP:9090"
+                echo "USER: admin"
+                echo "PASS: admin123"
             '''
         }
 
         failure {
-            echo "Pipeline failed"
+            echo "PIPELINE FAILED"
         }
     }
 }
