@@ -23,7 +23,6 @@ pipeline {
                 echo "=== Building Docker Image ==="
                 dir('app') {
                     sh '''
-                        ls -la
                         docker build -t $DOCKER_REGISTRY/$DOCKER_USERNAME/$IMAGE_NAME:$BUILD_NUMBER .
                         docker tag $DOCKER_REGISTRY/$DOCKER_USERNAME/$IMAGE_NAME:$BUILD_NUMBER \
                                    $DOCKER_REGISTRY/$DOCKER_USERNAME/$IMAGE_NAME:latest
@@ -53,28 +52,36 @@ pipeline {
             steps {
                 echo "=== Deploying to Kubernetes ==="
                 sh '''
-                    set -e
-
-                    echo "Applying DB..."
                     kubectl apply -f K8s/db-pvc.yaml
                     kubectl apply -f K8s/db-deployment.yml
                     kubectl apply -f K8s/db-service.yml
 
-                    echo "Waiting for Postgres..."
                     kubectl rollout status deployment/postgres --timeout=180s
 
-                    echo "Applying App..."
                     kubectl apply -f K8s/web-deployment.yml
                     kubectl apply -f K8s/web-service.yml
                     kubectl apply -f K8s/web-hpa.yml
 
-                    echo "Waiting for App..."
                     kubectl rollout status deployment/notes-webapp --timeout=180s
 
-                    echo "Final Status:"
                     kubectl get pods -o wide
                     kubectl get svc
                     kubectl get hpa
+                '''
+            }
+        }
+
+        stage('Expose Services') {
+            steps {
+                sh '''
+                    echo "=== Exposing Services ==="
+
+                    kubectl patch svc notes-webapp-svc -p '{"spec":{"type":"NodePort"}}'
+                    kubectl patch svc monitoring-grafana -n monitoring -p '{"spec":{"type":"NodePort"}}'
+                    kubectl patch svc monitoring-kube-prometheus-prometheus -n monitoring -p '{"spec":{"type":"NodePort"}}'
+
+                    echo "=== FINAL SERVICES ==="
+                    kubectl get svc -A
                 '''
             }
         }
@@ -83,7 +90,7 @@ pipeline {
     post {
         success {
             echo "PIPELINE SUCCESS ✔"
-            echo "App URL: http://<EC2-IP>:30080"
+            echo "App: http://<EC2-IP>:30080"
         }
         failure {
             echo "PIPELINE FAILED ❌"
