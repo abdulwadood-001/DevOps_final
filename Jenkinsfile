@@ -150,48 +150,61 @@ pipeline {
         // ─────────────────────────────────────────────
         stage('Expose Services') {
             steps {
-                sh '''
+                sh """
                     set -e
 
                     # ── App service ───────────────────────────────────────────────
-                    echo "=== Exposing Application on NodePort $APP_PORT ==="
-                    kubectl patch svc notes-webapp-svc \
-                        -p "{\"spec\":{\"type\":\"NodePort\",\"ports\":[{\"port\":3000,\"targetPort\":3000,\"nodePort\":$APP_PORT}]}}"
+                    echo '=== Exposing Application on NodePort ${APP_PORT} ==='
+                    kubectl patch svc notes-webapp-svc --type=json \
+                        -p='[{"op":"replace","path":"/spec/type","value":"NodePort"},{"op":"replace","path":"/spec/ports/0/nodePort","value":${APP_PORT}}]' \
+                        2>/dev/null || \
+                    kubectl patch svc notes-webapp-svc --type=merge \
+                        -p '{"spec":{"type":"NodePort","ports":[{"port":3000,"targetPort":3000,"nodePort":${APP_PORT}}]}}'
 
-                    # ── Grafana – patch only if NodePort is not already set ───────
-                    GRAFANA_SVC=$(kubectl get svc -n $MONITORING_NS \
-                        -l "app.kubernetes.io/name=grafana" -o jsonpath="{.items[0].metadata.name}")
+                    # ── Grafana – discover service name then patch ─────────────────
+                    GRAFANA_SVC=\$(kubectl get svc -n ${MONITORING_NS} \
+                        -l "app.kubernetes.io/name=grafana" \
+                        -o jsonpath='{.items[0].metadata.name}')
+                    echo "Grafana service: \$GRAFANA_SVC"
 
-                    CURRENT_GRAFANA_TYPE=$(kubectl get svc "$GRAFANA_SVC" -n $MONITORING_NS \
-                        -o jsonpath="{.spec.type}")
+                    CURRENT_GRAFANA_TYPE=\$(kubectl get svc "\$GRAFANA_SVC" -n ${MONITORING_NS} \
+                        -o jsonpath='{.spec.type}')
 
-                    if [ "$CURRENT_GRAFANA_TYPE" != "NodePort" ]; then
-                        echo "=== Patching Grafana service to NodePort $GRAFANA_PORT ==="
-                        kubectl patch svc "$GRAFANA_SVC" -n $MONITORING_NS \
-                            -p "{\"spec\":{\"type\":\"NodePort\",\"ports\":[{\"port\":80,\"targetPort\":3000,\"nodePort\":$GRAFANA_PORT}]}}"
+                    if [ "\$CURRENT_GRAFANA_TYPE" != "NodePort" ]; then
+                        echo '=== Patching Grafana service to NodePort ${GRAFANA_PORT} ==='
+                        kubectl patch svc "\$GRAFANA_SVC" -n ${MONITORING_NS} --type=merge \
+                            -p '{"spec":{"type":"NodePort","ports":[{"port":80,"targetPort":3000,"nodePort":${GRAFANA_PORT}}]}}'
                     else
-                        echo "=== Grafana already on NodePort – skipping patch ==="
+                        echo '=== Grafana already NodePort – verifying port ==='
+                        kubectl patch svc "\$GRAFANA_SVC" -n ${MONITORING_NS} --type=json \
+                            -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":${GRAFANA_PORT}}]' \
+                            2>/dev/null || true
                     fi
 
-                    # ── Prometheus – patch only if NodePort is not already set ────
-                    PROM_SVC=$(kubectl get svc -n $MONITORING_NS \
-                        -l "app=kube-prometheus-stack-prometheus" -o jsonpath="{.items[0].metadata.name}")
+                    # ── Prometheus – discover service name then patch ──────────────
+                    PROM_SVC=\$(kubectl get svc -n ${MONITORING_NS} \
+                        -l "app=kube-prometheus-stack-prometheus" \
+                        -o jsonpath='{.items[0].metadata.name}')
+                    echo "Prometheus service: \$PROM_SVC"
 
-                    CURRENT_PROM_TYPE=$(kubectl get svc "$PROM_SVC" -n $MONITORING_NS \
-                        -o jsonpath="{.spec.type}")
+                    CURRENT_PROM_TYPE=\$(kubectl get svc "\$PROM_SVC" -n ${MONITORING_NS} \
+                        -o jsonpath='{.spec.type}')
 
-                    if [ "$CURRENT_PROM_TYPE" != "NodePort" ]; then
-                        echo "=== Patching Prometheus service to NodePort $PROMETHEUS_PORT ==="
-                        kubectl patch svc "$PROM_SVC" -n $MONITORING_NS \
-                            -p "{\"spec\":{\"type\":\"NodePort\",\"ports\":[{\"port\":9090,\"targetPort\":9090,\"nodePort\":$PROMETHEUS_PORT}]}}"
+                    if [ "\$CURRENT_PROM_TYPE" != "NodePort" ]; then
+                        echo '=== Patching Prometheus service to NodePort ${PROMETHEUS_PORT} ==='
+                        kubectl patch svc "\$PROM_SVC" -n ${MONITORING_NS} --type=merge \
+                            -p '{"spec":{"type":"NodePort","ports":[{"port":9090,"targetPort":9090,"nodePort":${PROMETHEUS_PORT}}]}}'
                     else
-                        echo "=== Prometheus already on NodePort – skipping patch ==="
+                        echo '=== Prometheus already NodePort – verifying port ==='
+                        kubectl patch svc "\$PROM_SVC" -n ${MONITORING_NS} --type=json \
+                            -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":${PROMETHEUS_PORT}}]' \
+                            2>/dev/null || true
                     fi
 
-                    echo ""
-                    echo "=== ALL SERVICES ==="
+                    echo ''
+                    echo '=== ALL SERVICES ==='
                     kubectl get svc -A
-                '''
+                """
             }
         }
     }
@@ -201,22 +214,27 @@ pipeline {
     // ─────────────────────────────────────────────────
     post {
         success {
-            sh '''
-                NODE_IP=$(kubectl get nodes -o jsonpath="{.items[0].status.addresses[?(@.type==\\"ExternalIP\\")].address}" 2>/dev/null \
-                    || kubectl get nodes -o jsonpath="{.items[0].status.addresses[0].address}")
-                echo ""
-                echo "════════════════════════════════════════"
-                echo "  PIPELINE SUCCESS ✔"
-                echo "════════════════════════════════════════"
-                echo "  APP        → http://${NODE_IP}:30080"
-                echo "  GRAFANA    → http://${NODE_IP}:30090  (admin / admin)"
-                echo "  PROMETHEUS → http://${NODE_IP}:30091"
-                echo "════════════════════════════════════════"
-            '''
+            sh """
+                NODE_IP=\$(kubectl get nodes \
+                    -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}' \
+                    2>/dev/null || true)
+                if [ -z "\$NODE_IP" ]; then
+                    NODE_IP=\$(kubectl get nodes \
+                        -o jsonpath='{.items[0].status.addresses[0].address}')
+                fi
+                echo ''
+                echo '════════════════════════════════════════'
+                echo '  PIPELINE SUCCESS'
+                echo '════════════════════════════════════════'
+                echo "  APP        -> http://\${NODE_IP}:30080"
+                echo "  GRAFANA    -> http://\${NODE_IP}:30090  (admin / admin)"
+                echo "  PROMETHEUS -> http://\${NODE_IP}:30091"
+                echo '════════════════════════════════════════'
+            """
         }
 
         failure {
-            echo "PIPELINE FAILED ❌ – check the stage logs above"
+            echo "PIPELINE FAILED - check the stage logs above"
         }
     }
 }
